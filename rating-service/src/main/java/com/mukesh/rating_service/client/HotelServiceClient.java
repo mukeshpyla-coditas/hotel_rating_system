@@ -5,10 +5,9 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 
 @FeignClient(
-        name = "hotel-service",
-        url = "${services.hotel.url}"
+        name = "HOTEL-SERVICE"
 )
 public interface HotelServiceClient {
-    @GetMapping("/{id}")
-    void getHotelById(@PathVariable(name = "id") Long id);
+    @GetMapping("/api/v1/hotel/{id}")
+    Object getHotelById(@PathVariable(name = "id") Long id);
 }

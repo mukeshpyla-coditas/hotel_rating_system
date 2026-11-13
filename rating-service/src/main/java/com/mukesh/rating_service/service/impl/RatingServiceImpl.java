@@ -4,6 +4,7 @@ import com.mukesh.rating_service.client.HotelServiceClient;
 import com.mukesh.rating_service.client.UserServiceClient;
 import com.mukesh.rating_service.dto.request.CreateRatingRequestDto;
 import com.mukesh.rating_service.dto.request.UpdateRatingRequestDto;
+import com.mukesh.rating_service.dto.response.GetRatingDetailsResponseDto;
 import com.mukesh.rating_service.entity.Rating;
 import com.mukesh.rating_service.exception.ResourceNotFoundException;
 import com.mukesh.rating_service.repository.RatingRepository;
@@ -82,6 +83,12 @@ public class RatingServiceImpl implements RatingService {
 
         log.info("Updated the details of the specified rating-{}", rating.getId());
         return ratingRepository.save(rating);
+    }
+
+    @Override
+    public GetRatingDetailsResponseDto getAllDetailsOfARating(Long ratingId) {
+        Rating requestedRating = ratingRepository.findById(ratingId).orElseThrow(() -> new ResourceNotFoundException("No rating is found with specified ID. Please verify and try again."));
+
     }
 
 
