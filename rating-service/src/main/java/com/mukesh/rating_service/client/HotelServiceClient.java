@@ -1,5 +1,6 @@
 package com.mukesh.rating_service.client;
 
+import com.mukesh.rating_service.client.fallback.HotelServiceClientFallbackFactory;
 import com.mukesh.rating_service.dto.response.HotelServiceResponseDto;
 import com.mukesh.rating_service.payload.ApiResponse;
 import org.springframework.cloud.openfeign.FeignClient;
@@ -7,7 +8,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 
 @FeignClient(
-        name = "HOTEL-SERVICE"
+        name = "HOTEL-SERVICE",
+        fallbackFactory = HotelServiceClientFallbackFactory.class
 )
 public interface HotelServiceClient {
     @GetMapping("/api/v1/hotel/{id}")

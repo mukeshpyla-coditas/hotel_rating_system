@@ -7,6 +7,7 @@ import com.mukesh.rating_service.dto.request.UpdateRatingRequestDto;
 import com.mukesh.rating_service.dto.response.*;
 import com.mukesh.rating_service.entity.Rating;
 import com.mukesh.rating_service.exception.ResourceNotFoundException;
+import com.mukesh.rating_service.exception.ServiceUnavailableException;
 import com.mukesh.rating_service.payload.ApiResponse;
 import com.mukesh.rating_service.repository.RatingRepository;
 import com.mukesh.rating_service.service.RatingService;
@@ -20,6 +21,8 @@ import java.util.List;
 @RequiredArgsConstructor
 @Slf4j
 public class RatingServiceImpl implements RatingService {
+    private static final String UNAVAILABLE = "Unavailable";
+
     private final RatingRepository ratingRepository;
     private final UserServiceClient userServiceClient;
     private final HotelServiceClient hotelServiceClient;
@@ -27,11 +30,18 @@ public class RatingServiceImpl implements RatingService {
     @Override
     public String createRating(CreateRatingRequestDto request) {
         // Step-1: Validate the provided userId
-        userServiceClient.getUserById(request.userId());
+        // A fallback response (no data) means we could not verify the user, so we must not save the rating
+        ApiResponse<UserServiceResponseDto> userValidation = userServiceClient.getUserById(request.userId());
+        if (userValidation == null || userValidation.data() == null) {
+            throw new ServiceUnavailableException("User service is currently unavailable, so the user could not be verified. Please try again later.");
+        }
         log.info("User ID-{} is validated!", request.userId());
 
         // Step-2: Validate the provided hotelId
-        hotelServiceClient.getHotelById(request.hotelId());
+        ApiResponse<HotelServiceResponseDto> hotelValidation = hotelServiceClient.getHotelById(request.hotelId());
+        if (hotelValidation == null || hotelValidation.data() == null) {
+            throw new ServiceUnavailableException("Hotel service is currently unavailable, so the hotel could not be verified. Please try again later.");
+        }
         log.info("Hotel ID-{} is validated!", request.hotelId());
 
         // Step-3: Build the rating with verified userId and hotelId
@@ -90,25 +100,46 @@ public class RatingServiceImpl implements RatingService {
     public GetRatingDetailsResponseDto getAllDetailsOfARating(Long ratingId) {
         Rating requestedRating = ratingRepository.findById(ratingId).orElseThrow(() -> new ResourceNotFoundException("No rating is found with specified ID. Please verify and try again."));
         // Make a call to UserService to get the details of the user
+        // If the call fails, the fallback returns a response without data and we degrade gracefully
         ApiResponse<UserServiceResponseDto> userServiceResponse = userServiceClient.getUserById(requestedRating.getUserId());
-        UserServiceResponseDto user = userServiceResponse.data();
-        log.info("Details of the user-{with user ID-{}} are fetched successfully!", requestedRating.getUserId());
+        UserServiceResponseDto user = userServiceResponse == null ? null : userServiceResponse.data();
         // Make a call to HotelService to get the details of the hotel
         ApiResponse<HotelServiceResponseDto> hotelServiceResponse = hotelServiceClient.getHotelById(requestedRating.getHotelId());
-        HotelServiceResponseDto hotel = hotelServiceResponse.data();
-        log.info("Details of the hotel-{with user ID-{}} are fetched successfully!", requestedRating.getHotelId());
+        HotelServiceResponseDto hotel = hotelServiceResponse == null ? null : hotelServiceResponse.data();
 
-        UserDetailsResponseDto userDetails = UserDetailsResponseDto.builder()
-                .userName(user.firstName() + " " + user.middleName() + " " + user.lastName())
-                .contactNumber(user.contactNumber())
-                .email(user.email())
-                .build();
+        UserDetailsResponseDto userDetails;
+        if (user != null) {
+            log.info("Details of the user with ID-{} are fetched successfully!", requestedRating.getUserId());
+            userDetails = UserDetailsResponseDto.builder()
+                    .userName(user.firstName() + " " + user.middleName() + " " + user.lastName())
+                    .contactNumber(user.contactNumber())
+                    .email(user.email())
+                    .build();
+        } else {
+            log.warn("User details for user ID-{} are unavailable, returning placeholder details", requestedRating.getUserId());
+            userDetails = UserDetailsResponseDto.builder()
+                    .userName(UNAVAILABLE)
+                    .contactNumber(UNAVAILABLE)
+                    .email(UNAVAILABLE)
+                    .build();
+        }
 
-        HotelDetailsResponseDto hotelDetails = HotelDetailsResponseDto.builder()
-                .hotelName(hotel.name())
-                .location(hotel.location())
-                .contactEmail(hotel.email())
-                .build();
+        HotelDetailsResponseDto hotelDetails;
+        if (hotel != null) {
+            log.info("Details of the hotel with ID-{} are fetched successfully!", requestedRating.getHotelId());
+            hotelDetails = HotelDetailsResponseDto.builder()
+                    .hotelName(hotel.name())
+                    .location(hotel.location())
+                    .contactEmail(hotel.email())
+                    .build();
+        } else {
+            log.warn("Hotel details for hotel ID-{} are unavailable, returning placeholder details", requestedRating.getHotelId());
+            hotelDetails = HotelDetailsResponseDto.builder()
+                    .hotelName(UNAVAILABLE)
+                    .location(UNAVAILABLE)
+                    .contactEmail(UNAVAILABLE)
+                    .build();
+        }
 
         return GetRatingDetailsResponseDto.builder()
                 .feedback(requestedRating.getFeedback())
