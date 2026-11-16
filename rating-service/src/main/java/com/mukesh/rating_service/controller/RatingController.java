@@ -2,6 +2,7 @@ package com.mukesh.rating_service.controller;
 
 import com.mukesh.rating_service.dto.request.CreateRatingRequestDto;
 import com.mukesh.rating_service.dto.request.UpdateRatingRequestDto;
+import com.mukesh.rating_service.dto.response.GetRatingDetailsResponseDto;
 import com.mukesh.rating_service.entity.Rating;
 import com.mukesh.rating_service.payload.ApiResponse;
 import com.mukesh.rating_service.service.RatingService;
@@ -85,6 +86,17 @@ public class RatingController {
                         HttpStatus.OK.value(),
                         "Updated the details of the requested rating!",
                         ratingService.updateRating(ratingId, request)
+                )
+        );
+    }
+
+    @GetMapping("/complete-details/{id}")
+    public ResponseEntity<ApiResponse<GetRatingDetailsResponseDto>> getCompleteDetailsOfARating(@PathVariable(name = "id") Long id) {
+        return ResponseEntity.ok(
+                ApiResponse.success(
+                        HttpStatus.OK.value(),
+                        "Fetched complete details of the requested rating(along with respective user and hotel details)",
+                        ratingService.getAllDetailsOfARating(id)
                 )
         );
     }

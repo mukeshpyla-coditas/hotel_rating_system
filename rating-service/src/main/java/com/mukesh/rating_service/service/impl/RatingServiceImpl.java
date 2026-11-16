@@ -4,9 +4,10 @@ import com.mukesh.rating_service.client.HotelServiceClient;
 import com.mukesh.rating_service.client.UserServiceClient;
 import com.mukesh.rating_service.dto.request.CreateRatingRequestDto;
 import com.mukesh.rating_service.dto.request.UpdateRatingRequestDto;
-import com.mukesh.rating_service.dto.response.GetRatingDetailsResponseDto;
+import com.mukesh.rating_service.dto.response.*;
 import com.mukesh.rating_service.entity.Rating;
 import com.mukesh.rating_service.exception.ResourceNotFoundException;
+import com.mukesh.rating_service.payload.ApiResponse;
 import com.mukesh.rating_service.repository.RatingRepository;
 import com.mukesh.rating_service.service.RatingService;
 import lombok.RequiredArgsConstructor;
@@ -88,7 +89,34 @@ public class RatingServiceImpl implements RatingService {
     @Override
     public GetRatingDetailsResponseDto getAllDetailsOfARating(Long ratingId) {
         Rating requestedRating = ratingRepository.findById(ratingId).orElseThrow(() -> new ResourceNotFoundException("No rating is found with specified ID. Please verify and try again."));
+        // Make a call to UserService to get the details of the user
+        ApiResponse<UserServiceResponseDto> userServiceResponse = userServiceClient.getUserById(requestedRating.getUserId());
+        UserServiceResponseDto user = userServiceResponse.data();
+        log.info("Details of the user-{with user ID-{}} are fetched successfully!", requestedRating.getUserId());
+        // Make a call to HotelService to get the details of the hotel
+        ApiResponse<HotelServiceResponseDto> hotelServiceResponse = hotelServiceClient.getHotelById(requestedRating.getHotelId());
+        HotelServiceResponseDto hotel = hotelServiceResponse.data();
+        log.info("Details of the hotel-{with user ID-{}} are fetched successfully!", requestedRating.getHotelId());
 
+        UserDetailsResponseDto userDetails = UserDetailsResponseDto.builder()
+                .userName(user.firstName() + " " + user.middleName() + " " + user.lastName())
+                .contactNumber(user.contactNumber())
+                .email(user.email())
+                .build();
+
+        HotelDetailsResponseDto hotelDetails = HotelDetailsResponseDto.builder()
+                .hotelName(hotel.name())
+                .location(hotel.location())
+                .contactEmail(hotel.email())
+                .build();
+
+        return GetRatingDetailsResponseDto.builder()
+                .feedback(requestedRating.getFeedback())
+                .ratingId(requestedRating.getId())
+                .rating(requestedRating.getRating())
+                .hotelDetails(hotelDetails)
+                .userDetails(userDetails)
+                .build();
     }
 
 
