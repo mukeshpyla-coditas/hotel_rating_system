@@ -1,4 +1,4 @@
-package com.mukesh.auth_server.dto;
+package com.mukesh.auth_server.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;

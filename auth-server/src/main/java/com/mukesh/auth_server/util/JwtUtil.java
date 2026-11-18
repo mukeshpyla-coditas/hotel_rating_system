@@ -18,16 +18,20 @@ public class JwtUtil {
     private final CustomUserDetailsService customUserDetailsService;
     private final String secret;
     private final Integer expirationTime;
+    private final String issuer;
 
     JwtUtil(
             @Value("${jwt.expiration-minutes}")
             Integer expirationTime,
             @Value("${jwt.secret}")
             String secret,
+            @Value("${jwt.issuer}")
+            String issuer,
             CustomUserDetailsService customUserDetailsService
     ) {
         this.expirationTime = expirationTime;
         this.secret = secret;
+        this.issuer = issuer;
         this.customUserDetailsService = customUserDetailsService;
     }
 
@@ -37,6 +41,7 @@ public class JwtUtil {
                 .subject(username)
                 .issuedAt(new Date())
                 .expiration(new Date(System.currentTimeMillis() + ((long) expirationTime * 60 * 1000)))
+                .issuer(issuer)
                 .and()
                 .claim("userId", userId)
                 .claim("role", role)
