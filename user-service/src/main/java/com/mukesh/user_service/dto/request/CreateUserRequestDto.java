@@ -17,9 +17,12 @@ public record CreateUserRequestDto(
         String lastName,
 
         @NotBlank(message = "Email is required")
-        @Email(message = "Please provide a valid email address")
+        @Email(message = "Please provide a valid email address! This will work as your username from now on.")
         @Size(max = 100, message = "Email cannot exceed 100 characters")
         String email,
+
+        @NotBlank(message = "Password is required! Please set your password.")
+        String password,
 
         @NotBlank(message = "Contact number is required")
         @Pattern(
