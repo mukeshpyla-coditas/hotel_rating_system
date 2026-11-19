@@ -289,6 +289,54 @@ flowchart LR
 - **BFF (Backend For Frontend):** sometimes you run one gateway per client type (web, mobile) with tailored responses.
 - Two variants exist: WebFlux (reactive, used here) and WebMVC (servlet-based).
 
+### Reactive (WebFlux/Netty) vs servlet (MVC/Tomcat), and gateway filters
+
+**1. Servlet (MVC) vs Reactive (WebFlux)**
+- "MVC" in Spring MVC is the usual Model-View-Controller pattern. The MVC vs WebFlux difference is about **how requests are handled underneath**, not the pattern.
+- **Spring MVC:** Servlet API + Tomcat + **thread per request**. A thread blocks while waiting for DB or HTTP calls. Used in our business services (JPA is blocking).
+- **Spring WebFlux:** Reactive Streams + Netty + **event loop**. A few threads serve many requests and never wait. Used in the API gateway.
+- Controllers, services and repositories look the same in both. Only the engine below differs.
+
+**2. Netty**
+- A web server, like Tomcat. Spring MVC embeds Tomcat. WebFlux and Cloud Gateway embed Netty.
+- **Event loop:** a few threads loop, run the next small piece of work when something happens (a request arrives, a response returns), and never sit waiting.
+
+**3. Reactive and Mono/Flux**
+- **Reactive:** don't wait for a result. Describe what to do when it arrives.
+- `Mono<T>` = 0 or 1 value that arrives later. `Flux<T>` = 0 to N values.
+- Nothing runs until something subscribes. The framework subscribes for you.
+- Chain steps with `.map`, `.flatMap`, `.onErrorResume`, `.timeout`.
+- **Never block inside a reactive app** (no `.block()`, no `RestTemplate`, no JDBC). It stalls the few event-loop threads. Use `WebClient` instead.
+- Reactive helps with very many concurrent I/O waits (gateways). For normal CRUD with JPA it adds complexity for little gain.
+
+**4. `OncePerRequestFilter` vs `GlobalFilter`**
+
+| | `OncePerRequestFilter` | `GlobalFilter` |
+|---|---|---|
+| Stack | Servlet (MVC) | Reactive (Cloud Gateway) |
+| Request/response | `HttpServletRequest` / `HttpServletResponse` | `ServerWebExchange` |
+| Continue | `filterChain.doFilter(req, res)` | `return chain.filter(exchange)` |
+| Return type | `void` (blocking) | `Mono<Void>` |
+| Modify request | Wrap it or set attributes | Immutable: `exchange.mutate().request(...).build()` |
+| Reject | `response.setStatus(401); return;` | `setStatusCode(...); return response.setComplete();` |
+| Order | `@Order` or position in the security chain | `Ordered.getOrder()` (ours is `-1`, before routing) |
+
+- `OncePerRequestFilter` doesn't work in the gateway because the servlet API doesn't exist in WebFlux.
+- Always return the `Mono`. Setting the status without returning `setComplete()` means the response never finishes.
+
+**5. `GlobalFilter` vs `GatewayFilter`**
+- **`GlobalFilter`:** applies to **every route** automatically. Use it for authentication, logging, tracing.
+- **`GatewayFilter`:** applies only to **routes you attach it to**, and can take per-route config.
+  - Written as `XxxGatewayFilterFactory extends AbstractGatewayFilterFactory`.
+  - Attached in route config: `...routes[n].filters[0]=Xxx`.
+  - Built-in examples: `StripPrefix`, `AddRequestHeader`, `RequestRateLimiter`, `CircuitBreaker`.
+- **Example:** audit-log only the rating routes, or a stricter rate limit on one route, means `GatewayFilter`.
+
+**6. Rule of thumb**
+- MVC service: `OncePerRequestFilter` (like our `JwtFilter`).
+- Gateway, all requests: `GlobalFilter`.
+- Gateway, specific routes: `GatewayFilter`.
+
 ### Observed in this project
 With hotel-service stopped, the gateway returned a generic 500 whitelabel page. That means no clean error, no fallback, and no protection against repeated calls. Topic 5 addresses this.
 
@@ -592,4 +640,103 @@ The gateway is a convenience and first filter, not the only wall. Services must 
 - Forgetting to propagate identity in Feign calls, so downstream services reject the request or treat it as anonymous.
 
 ### 6.9 Where we apply it in this project
-To be decided and built step by step (authorization server choice, gateway validation, resource-server setup in each service, Feign token propagation).
+We built a **custom** auth-server (Spring Security + JJWT) rather than Keycloak, to learn the mechanics. Production would normally use a proven authorization server (see 6.7).
+
+**auth-server (`/api/v1/auth`)**
+- `POST /api/v1/auth`: registers a credentials record (synced from user-service via Feign). Public.
+- `POST /api/v1/auth/login`: `AuthenticationManager` + `DaoAuthenticationProvider` + BCrypt check the password, then `JwtUtil` issues a token. Public.
+- `GET /api/v1/auth/validate`: verifies the Bearer token and returns `userId`, `username`, `role`. Authenticated.
+- Stateless: CSRF off, `SessionCreationPolicy.STATELESS`, a `JwtFilter` before `UsernamePasswordAuthenticationFilter`, 401 via `HttpStatusEntryPoint`.
+- The JWT carries `sub` = username, `userId`, `role`, `exp` (from `jwt.expiration-minutes`), signed with **HS256** and a shared `jwt.secret`.
+
+**Gateway `AuthenticationFilter` (global filter, order -1)**
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as API Gateway
+    participant A as auth-server
+    participant S as Service
+    C->>G: request + Bearer token
+    G->>A: GET /validate (token)
+    A-->>G: userId, username, role
+    G->>G: role allowed for this path?
+    G->>S: forward + X-User-Id / X-User-Name / X-User-Role
+```
+- **Public endpoints:** exact-match `POST /api/v1/auth/login` and `POST /api/v1/user`. Everything else needs a token (fail closed).
+- **Remote validation:** the gateway calls auth-server for every request using a load-balanced `WebClient` with a 3 s timeout (`http://AUTH-SERVER/...`).
+- **Status codes:** missing/invalid token gives 401, wrong role gives 403, auth-server down or slow gives 503 (never lets the request through).
+- **Role rules by path prefix:** hotel, rating and user allow `USER` and `ADMIN`. Any unlisted path is `ADMIN` only (coarse authorization).
+- **Identity headers:** the gateway strips any client-sent `X-User-*` headers first (anti-spoofing), then sets them from the validated token.
+
+**Trade-offs of this design**
+- Remote validation costs one extra network hop per request and makes auth-server a hard dependency. Local JWT validation (public key) avoids both.
+- The extra call does allow immediate revocation checks later (e.g. disabled users), which pure stateless validation cannot.
+- HS256 shares one secret between issuer and verifier. Here only auth-server holds it, which is fine. If the gateway verified locally, it would also need the secret.
+- Services trust `X-User-*` headers, so they must not be reachable except through the gateway.
+
+**Gap: direct access to services.** The filter protects only traffic that goes through the gateway. Calling a service port directly skips all checks. Ways to close it:
+- **Network isolation (strongest):** expose only the gateway. Docker Compose internal network with no published service ports; Kubernetes `ClusterIP` services plus NetworkPolicies; private subnets and security groups in the cloud.
+- **Per-service JWT validation (defence in depth):** each service verifies the token itself. Best with RS256 and a JWKS endpoint, so services can verify but not forge tokens.
+- **Shared secret header (planned next):** the gateway adds `X-Gateway-Secret: <value>` and services reject requests without it. Simple, but a static secret that proves "came through the gateway", not who the user is, and a leak exposes everything. A stopgap. Keep the secret encrypted in config-repo, overwrite any client-sent copy at the gateway, and exempt health checks.
+- **mTLS or a service mesh:** certificate-based identity between services, for larger systems.
+
+**Still open:** services do not yet validate anything themselves (defence in depth), no ownership checks, no Feign token/identity propagation, no refresh tokens, the JWT secret should move to a secret store, and `/api/v1/auth` registration is only as protected as the network around it.
+
+---
+
+## 7. Rate limiting and Redis
+
+### 7.1 Redis basics
+- **Redis:** an in-memory key-value store. Very fast, so it is used for caching, counters, sessions and rate limiting.
+- **Run locally (no admin, no Docker):** the portable Windows build (`redis-server.exe`, Redis 5.0.14), port **6379**. Test with `redis-cli ping`, which answers `PONG`.
+- **Commands we used:**
+  - `SET key value` / `GET key`: plain key-value.
+  - `INCR key`: adds 1 and returns the new value. **Atomic**, so concurrent callers never lose a count.
+  - `EXPIRE key seconds`: the key deletes itself after the time.
+  - `TTL key`: seconds left. `-1` = exists with no expiry, `-2` = key does not exist.
+  - `KEYS *`: lists all keys. Fine for dev, avoid in production (it scans every key).
+- A rate limiter is mostly **a counter with a timeout, in a shared store**.
+- Because Redis is shared, every gateway instance sees the same counts. An in-memory limiter would count per instance.
+
+### 7.2 Rate limiting concepts
+- **Incoming limits** (gateway, per client) protect against abuse, floods and brute force. **Outgoing limits** (Resilience4j RateLimiter on Feign calls) respect a third-party quota. We built incoming first, since we only call our own services.
+- **Fixed window:** count requests per time window. Simple, but allows a double burst around a window edge.
+- **Token bucket (what Gateway uses):**
+  - Each client has a bucket of tokens, and each request costs `requestedTokens` (1).
+  - Empty bucket means **429 Too Many Requests**.
+  - **`burstCapacity`:** the bucket size, the most requests allowed at once.
+  - **`replenishRate`:** tokens added per second, the sustained rate.
+  - Allows short bursts but keeps the long-term average under the limit.
+- **Redis storage:** per key, the remaining tokens and the last refill time, updated by one atomic **Lua script**, so concurrent requests cannot race. Redis 5 supports Lua scripting.
+
+### 7.3 In this project
+- Gateway dependency: `spring-boot-starter-data-redis-reactive` (reactive, because the gateway is WebFlux and must not block).
+- Redis location in `config-repo/api-gateway.properties`: `spring.data.redis.host` / `port`.
+- `RequestRateLimiter` is a per-route `GatewayFilter` with `key-resolver` and `redis-rate-limiter.*` args.
+
+| Route | burstCapacity | replenishRate |
+|---|---|---|
+| login (`/api/v1/auth/login`) | 10 | 5 / s |
+| user, hotel, rating | 40 | 20 / s |
+
+- **`KeyResolver` (`ipKeyResolver`):** decides who is limited. It returns the client IP only. This Gateway version already prefixes the route id to the Redis key (observed key: `request_rate_limiter.{auth-server.auth-server:<ip>}.tokens` back when our resolver also added the route id), so each route gets its own bucket per IP without any help from us.
+- **Redis keys per client:** `.tokens` (tokens left) and `.timestamp` (last refill). The `{...}` braces keep both keys together for Redis Cluster. Keys expire on their own.
+- **Observed:** with burst 10, `X-RateLimit-Remaining` went 9, 8, 7 on successive requests, and after the burst the response was 429 with `Remaining: 0`.
+- **Filter order:** `AuthenticationFilter` order changed from `-1` to `100`. Route filters such as the limiter run at order 1+, so a flood is rejected with 429 **before** the gateway calls auth-server.
+- **Response headers:** `X-RateLimit-Remaining`, `X-RateLimit-Burst-Capacity`, `X-RateLimit-Replenish-Rate`, `X-RateLimit-Requested-Tokens`.
+
+### 7.4 What a senior engineer should know
+- Choose the key deliberately: IP (unauthenticated routes, brute force), user id (authenticated APIs), API key (partners).
+- **Fail-open by default:** if Redis is down, Gateway allows the request. Good for availability, but the limit is gone. Switch to fail-closed only if abuse protection matters more.
+- `getRemoteAddress()` is the direct caller. Behind a load balancer or proxy every client looks the same, so resolve the real IP from `X-Forwarded-For` and trust it only from known proxies.
+- Many users behind one NAT or office IP share a bucket. Per-user limits are fairer once authenticated.
+- A rate limiter does not replace a circuit breaker or bulkhead. It limits clients, they protect against failing dependencies.
+- Return `429` with a `Retry-After` hint where possible, and tune limits from real traffic.
+- Redis is a single point of failure for the limiter. Production runs Redis with replication or Sentinel/Cluster.
+
+### 7.5 Pitfalls
+- Assuming how the Redis key is built without checking it. Inspect real keys with `KEYS *` and confirm per-route buckets.
+- Rate limiter running after authentication, so floods still hit auth-server.
+- Using a blocking Redis client in a reactive gateway.
+- `config-repo` changes not committed, so Config Server serves the old file.
+- Trusting `X-Forwarded-For` from anyone, which lets clients fake their IP.
