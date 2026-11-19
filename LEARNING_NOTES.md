@@ -90,11 +90,38 @@ Notes are in the order the work was committed.
 
 ---
 
+## 2026-11-17 to 2026-11-19: Security (auth-server and gateway filter)
+
+### `8804e15`, `a309d82`, `263b69f`: auth-server
+- New `auth-server` with its own credentials DB (`AuthUser`, `Role`), `CustomUserDetailsService`, BCrypt, an `AuthenticationManager`, a custom `JwtUtil` (JJWT, HS256) and a `JwtFilter`.
+- APIs: `POST /api/v1/auth` (register), `POST /api/v1/auth/login` (returns JWT), `GET /api/v1/auth/validate` (returns userId, username, role).
+- User credentials are synced from user-service through Feign.
+- **Learned:** stateless security config, how `AuthenticationManager` verifies a password, JWT claims and expiry.
+
+### Gateway `AuthenticationFilter` (uncommitted at time of writing)
+- Global filter (order -1) that asks auth-server to validate the Bearer token, then applies path-based role rules and forwards `X-User-Id/Name/Role` headers.
+- Public: `POST /api/v1/auth/login` and `POST /api/v1/user`. Fails closed: 401 (bad token), 403 (wrong role), 503 (auth-server unavailable).
+- Strips client-supplied identity headers to stop spoofing.
+- Added `WebClientConfig` (load-balanced `WebClient.Builder`) and `ValidateTokenResponse` DTO.
+- **Learned:** reactive `GlobalFilter`, remote token validation vs local JWT verification, fail-closed design, header spoofing.
+
+---
+
+## 2026-11-19: Rate limiting with Redis (uncommitted at time of writing)
+- Docker Desktop could not be installed (no admin rights for WSL), so Redis runs as the portable Windows build (5.0.14) on port 6379.
+- Practised `SET`, `GET`, `INCR`, `EXPIRE`, `TTL`, `KEYS` in `redis-cli`.
+- Gateway: added `spring-boot-starter-data-redis-reactive`, `RateLimiterConfig` (`ipKeyResolver` = client IP; Gateway already adds the route id to the Redis key) and a `RequestRateLimiter` filter on each route in `config-repo/api-gateway.properties`.
+- Limits: login burst 10, 5/s; user, hotel, rating burst 40, 20/s.
+- `AuthenticationFilter` order changed from `-1` to `100`, so the limiter rejects floods before the auth-server call.
+- **Learned:** token bucket, atomic counters, Lua scripts in Redis, per-route buckets, filter ordering between route and global filters.
+
+---
+
 ## Current architecture
 ```
-Client -> API Gateway :8080 --+--> user-service   :8081
-                              +--> hotel-service  :8082
-                              +--> rating-service :8083 --(Feign)--> user / hotel
+Client -> API Gateway :8080 (AuthenticationFilter) --+--> user-service   :8081
+              |                                      +--> hotel-service  :8082
+              +--> auth-server (validate)            +--> rating-service :8083 --(Feign)--> user / hotel
 
 All services register with   -> Eureka :8761
 All services fetch config    -> Config Server :8888 -> config-repo (git)
@@ -106,7 +133,7 @@ All services fetch config    -> Config Server :8888 -> config-repo (git)
 
 ## Roadmap ahead
 1. **Resilience (in progress):** circuit breaker, timeouts and fallbacks on rating-service are done. Still to do: retry with backoff, a circuit breaker at the gateway with a clean 503, and load balancing across several instances.
-2. **Security:** JWT/OAuth2 validated at the gateway, and role-based access.
+2. **Security (gateway part done):** custom auth-server and gateway JWT validation with role rules are built. Still to do: defence in depth inside services, Feign identity propagation, ownership checks, secret management, refresh tokens.
 3. **Messaging:** Kafka or RabbitMQ and event-driven updates, plus Saga and outbox patterns.
 4. **Observability:** distributed tracing, centralized logging, metrics.
 5. **Packaging and deployment:** Docker, Docker Compose, Kubernetes, CI/CD.
