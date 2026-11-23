@@ -6,6 +6,8 @@ import com.mukesh.rating_service.dto.request.CreateRatingRequestDto;
 import com.mukesh.rating_service.dto.request.UpdateRatingRequestDto;
 import com.mukesh.rating_service.dto.response.*;
 import com.mukesh.rating_service.entity.Rating;
+import com.mukesh.rating_service.event.RatingCreatedEvent;
+import com.mukesh.rating_service.messaging.RatingEventPublisher;
 import com.mukesh.rating_service.exception.ResourceNotFoundException;
 import com.mukesh.rating_service.exception.ServiceUnavailableException;
 import com.mukesh.rating_service.payload.ApiResponse;
@@ -26,6 +28,7 @@ public class RatingServiceImpl implements RatingService {
     private final RatingRepository ratingRepository;
     private final UserServiceClient userServiceClient;
     private final HotelServiceClient hotelServiceClient;
+    private final RatingEventPublisher ratingEventPublisher;
 
     @Override
     public String createRating(CreateRatingRequestDto request) {
@@ -51,8 +54,12 @@ public class RatingServiceImpl implements RatingService {
                 .hotelId(request.hotelId())
                 .feedback(request.feedback())
                 .build();
-        ratingRepository.save(newRating);
+        Rating savedRating = ratingRepository.save(newRating);
         log.info("New rating is created by User-{} on Hotel-{}", request.userId(), request.hotelId());
+
+        // Step-4: Tell the rest of the system about it asynchronously (fire and forget)
+        ratingEventPublisher.publishRatingCreated(new RatingCreatedEvent(
+                savedRating.getId(), savedRating.getUserId(), savedRating.getHotelId(), savedRating.getRating()));
 
         return "Rating by user-" + request.userId() + " is successfully registered on the hotel-" + request.hotelId() + " !";
     }

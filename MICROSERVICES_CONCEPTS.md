@@ -13,6 +13,9 @@ For the chronological log of what was built and when, see `LEARNING_NOTES.md`.
 3. [Centralized configuration (Config Server)](#3-centralized-configuration-config-server)
 4. [API Gateway](#4-api-gateway)
 5. [Resilience (Resilience4j)](#5-resilience-resilience4j) (in progress)
+6. [Security (authentication and authorization)](#6-security-authentication-and-authorization)
+7. [Rate limiting and Redis](#7-rate-limiting-and-redis)
+8. [Asynchronous messaging with RabbitMQ](#8-asynchronous-messaging-with-rabbitmq)
 
 ---
 
@@ -740,3 +743,98 @@ sequenceDiagram
 - Using a blocking Redis client in a reactive gateway.
 - `config-repo` changes not committed, so Config Server serves the old file.
 - Trusting `X-Forwarded-For` from anyone, which lets clients fake their IP.
+
+
+---
+
+## 8. Asynchronous messaging with RabbitMQ
+
+### 8.1 What and why
+- **Synchronous (Feign/HTTP):** the caller waits for the answer. If the callee is down or slow, the caller fails or hangs, and the caller must know who to call.
+- **Asynchronous (messaging):** the sender hands a **message** to a **broker** and moves on. Receivers process it when ready. Like posting a letter instead of making a phone call.
+- **RabbitMQ:** a message broker that implements **AMQP 0-9-1**. It receives messages from producers, routes them, stores them in queues, and delivers them to consumers.
+- **Benefits:** decoupling (sender and receiver need not be up together), resilience (messages wait during outages), load levelling (spikes pile up in a queue), fan-out (one event, many consumers), faster user-facing requests.
+- **Costs:** results are eventually consistent, one more piece of infrastructure, and you must handle duplicates and failures (retries, idempotency, dead-letter queues).
+
+### 8.2 Architecture and vocabulary
+```mermaid
+flowchart LR
+    P[Producer] -- "routing key" --> E{Exchange}
+    E -- "binding" --> Q1[(Queue A)]
+    E -- "binding" --> Q2[(Queue B)]
+    Q1 --> C1[Consumer 1]
+    Q2 --> C2[Consumer 2]
+```
+- **Producer:** sends messages. **Consumer:** receives them.
+- **Message:** payload (we use JSON) plus properties/headers.
+- **Exchange:** receives from producers and decides which queue(s) get the message. **Producers never write to a queue directly.** They only know the exchange name and a routing key.
+- **Queue:** a buffer inside the broker. **The queue holds the message**, not the exchange.
+- **Binding:** a rule linking an exchange to a queue, with a binding key.
+- **Routing key:** a label on the message that the exchange matches against binding keys.
+- **Virtual host (vhost):** an isolated namespace in one broker. Default is `/`.
+- **Connection / channel:** a TCP link to the broker, and lightweight virtual links multiplexed inside it. Apps open one connection and several channels.
+- **Ack (acknowledgement):** the consumer tells the broker "processed", and only then is the message deleted. No ack means it is redelivered.
+- **Exchange types:**
+  - `direct`: routes where binding key equals routing key exactly.
+  - `fanout`: copies to every bound queue, ignores the key (broadcast).
+  - `topic`: pattern match on the key, e.g. `rating.*`, `rating.#`.
+  - `headers`: routes on message headers (rarely used).
+- **Default exchange (blank name):** a built-in direct exchange. Every queue is bound to it by its own name, so "send to queue X" works with routing key = X.
+- **Ports:** `5672` AMQP (applications), `15672` management UI (`guest`/`guest`, localhost only).
+
+### 8.3 The management UI
+- **Overview:** queued messages (Ready = waiting, Unacked = delivered but not acked), message rates, node health (memory, disk), listening ports, export/import definitions.
+- **Connections / Channels:** who is connected, and per-channel details (prefetch, unacked).
+- **Exchanges:** built-ins (`amq.*`) plus ours. Each has a bindings view and a manual *Publish message* panel.
+- **Queues and Streams:** type (classic, quorum, stream), Ready/Unacked/Total, consumers, bindings, *Get messages* (peek), purge, delete.
+- **Admin:** users and tags, vhosts, policies (TTL, max-length by name pattern), limits.
+
+### 8.4 Running it locally (no admin, no Docker)
+- Portable builds in `C:\Users\<user>\tools`: Erlang/OTP 28 in `erlang\`, RabbitMQ 4.4.1 in `rabbitmq\`, data in `rabbitmq-data\`.
+- Needs `ERLANG_HOME` and `RABBITMQ_BASE` set. The scripts `start-rabbitmq.bat` and `stop-rabbitmq.bat` set them.
+- Management UI enabled once with `rabbitmq-plugins enable rabbitmq_management`.
+- RabbitMQ 4.4 needs Erlang 27 or newer.
+
+### 8.5 In this project
+```mermaid
+flowchart LR
+    RS["rating-service<br/>createRating()"] -- "key: rating.created" --> EX{{"rating.exchange<br/>(topic)"}}
+    EX -- "binding: rating.created" --> Q[("hotel.rating.queue<br/>(durable)")]
+    Q --> HS["hotel-service<br/>@RabbitListener"]
+    HS --> DB[("hotels:<br/>averageRating, ratingCount")]
+```
+- **Dependency (both services):** `spring-boot-starter-amqp`. Defaults (`localhost:5672`, `guest/guest`) match our broker, so no config was needed.
+- **rating-service (producer):**
+  - `RabbitMQConfig` declares `rating.exchange` (topic, durable) and a `JacksonJsonMessageConverter`.
+  - `RatingEventPublisher` calls `rabbitTemplate.convertAndSend(exchange, key, event)` after the rating is saved.
+  - Event: `RatingCreatedEvent(ratingId, userId, hotelId, rating)`.
+- **hotel-service (consumer):**
+  - Declares the same exchange, the durable queue `hotel.rating.queue`, and the binding (key `rating.created`). **The consumer owns its queue.**
+  - `@RabbitListener(queues = ...)` receives the event. Normal return = ack.
+  - `HotelRepository.applyNewRating` updates the running average in **one atomic SQL statement**: `newAvg = (oldAvg*oldCount + rating) / (oldCount + 1)`.
+- **Each service has its own copy** of `RatingCreatedEvent`. Only the JSON field names must match, which keeps services decoupled (no shared library).
+- **Spring AMQP 4 / Boot 4 detail:** the JSON converter is `JacksonJsonMessageConverter` (Jackson 3). The older `Jackson2JsonMessageConverter` still exists.
+- **Verified in practice:**
+  - Test 2 (happy path): rating created, event published, hotel average and count updated.
+  - Test 3 (consumer offline): with `hotel-service` stopped, a message published by hand sat in the queue with Ready = 1. When `hotel-service` started, it was consumed at once and the queue returned to 0.
+
+### 8.6 What a senior engineer should know
+- **Delivery guarantees:** with acks you get **at-least-once** delivery. Duplicates are possible, so consumers must be **idempotent**. True exactly-once is not available end to end.
+- **Durability needs three things:** durable exchange, durable queue, and persistent messages (Spring AMQP sends persistent by default). Quorum queues replicate across nodes and are the safer choice in production.
+- **Publisher confirms** tell the producer the broker really accepted the message. Without them, a message can be lost silently.
+- **Dual-write problem:** saving to the DB and publishing to the broker are two separate systems, so one can succeed while the other fails. The fix is the **outbox pattern**.
+- **Poison messages:** a message that always fails would be redelivered forever. Use retries with backoff and a **dead-letter queue (DLQ)**.
+- **Ordering** is only guaranteed within one queue with one consumer. Multiple consumers can process out of order.
+- **Prefetch** controls how many unacked messages a consumer holds, which affects fairness and throughput.
+- **Competing consumers:** several instances of one service reading the same queue share the load (each message goes to one instance). Different services each need their **own queue** to all receive a copy.
+- **RabbitMQ vs Kafka (preview):** RabbitMQ is a smart broker that routes and deletes after ack. Kafka is a distributed log where messages are kept and consumers track their own position. Covered in the Kafka step.
+
+### 8.7 Pitfalls
+- Publishing to an exchange with **no bound queue**: the message is silently dropped. Consumers should declare their queues and bindings.
+- Expecting the **exchange** to hold messages. Only queues do.
+- Throwing from a listener for an error that will never succeed (e.g. unknown hotel). The default is **requeue and redeliver in a loop**. Handle it deliberately, or use a DLQ.
+- Read-modify-write in Java for counters or averages. Two concurrent messages overwrite each other. Update atomically in the DB.
+- Catching a failed publish and only logging it (what we do now): the event is lost. Acceptable while learning, not in production.
+- Forgetting that consumers must tolerate **duplicate** and **out-of-order** messages.
+- Starting the broker without `ERLANG_HOME` set, or on an Erlang version too old for the RabbitMQ release.
+- Rating **updates** do not yet republish an event, so the average drifts if a rating is edited.

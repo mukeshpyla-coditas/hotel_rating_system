@@ -44,4 +44,10 @@ public class Hotel {
     private LocalDateTime updatedAt;
 
     private boolean isActive;
+
+    // Maintained asynchronously from RatingCreatedEvent messages (see RatingEventListener).
+    // Wrapper types, because rows that existed before these columns were added hold NULL.
+    private Double averageRating;
+
+    private Integer ratingCount;
 }

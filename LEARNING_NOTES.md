@@ -117,6 +117,18 @@ Notes are in the order the work was committed.
 
 ---
 
+## 2026-11-23: Asynchronous messaging with RabbitMQ (uncommitted at time of writing)
+- Docker is unavailable, so RabbitMQ 4.4.1 and Erlang/OTP 28 run as portable builds in `~/tools` (no admin). Helper scripts: `start-rabbitmq.bat`, `stop-rabbitmq.bat`. Ports 5672 (AMQP) and 15672 (management UI).
+- Learned the concepts first (producer, consumer, exchange, queue, binding, routing key, ack, vhost) and toured every tab of the management UI.
+- Both `rating-service` and `hotel-service`: added `spring-boot-starter-amqp`.
+- `rating-service`: `RabbitMQConfig` (topic exchange `rating.exchange`, JSON converter), `RatingCreatedEvent`, `RatingEventPublisher`; `createRating()` publishes after saving.
+- `hotel-service`: durable queue `hotel.rating.queue` bound with key `rating.created`, `@RabbitListener` `RatingEventListener`, new `Hotel` fields `averageRating` and `ratingCount`, and an atomic JPQL `applyNewRating` update.
+- **Tested:** happy path (hotel average updates) and consumer-offline (message waited in the queue, consumed on restart).
+- **Learned:** the queue holds messages, not the exchange; a message published with no bound queue is dropped; consumers own their queues; at-least-once delivery means idempotent consumers; update aggregates atomically in SQL.
+- **Known gaps (next):** a failed publish is only logged (event lost), a throwing listener loops forever, rating updates are not published.
+
+---
+
 ## Current architecture
 ```
 Client -> API Gateway :8080 (AuthenticationFilter) --+--> user-service   :8081
@@ -125,6 +137,8 @@ Client -> API Gateway :8080 (AuthenticationFilter) --+--> user-service   :8081
 
 All services register with   -> Eureka :8761
 All services fetch config    -> Config Server :8888 -> config-repo (git)
+
+rating-service --(RatingCreatedEvent)--> RabbitMQ :5672 [rating.exchange -> hotel.rating.queue] --> hotel-service
 ```
 
 ## Housekeeping
@@ -134,7 +148,7 @@ All services fetch config    -> Config Server :8888 -> config-repo (git)
 ## Roadmap ahead
 1. **Resilience (in progress):** circuit breaker, timeouts and fallbacks on rating-service are done. Still to do: retry with backoff, a circuit breaker at the gateway with a clean 503, and load balancing across several instances.
 2. **Security (gateway part done):** custom auth-server and gateway JWT validation with role rules are built. Still to do: defence in depth inside services, Feign identity propagation, ownership checks, secret management, refresh tokens.
-3. **Messaging:** Kafka or RabbitMQ and event-driven updates, plus Saga and outbox patterns.
+3. **Messaging (RabbitMQ basics done):** the rating-created event flow works. Still to do: reliability (retries, dead-letter queues, idempotency, publisher confirms), exchange types hands-on, Kafka, plus Saga and outbox patterns.
 4. **Observability:** distributed tracing, centralized logging, metrics.
 5. **Packaging and deployment:** Docker, Docker Compose, Kubernetes, CI/CD.
 6. **Quality:** Testcontainers, contract tests, OpenAPI docs.

@@ -1,7 +1,7 @@
 # Microservices Learning Progress
 
 Project: Hotel Rating microservices (Spring Boot + Spring Cloud).
-Last updated: 2026-11-19.
+Last updated: 2026-11-23.
 
 Legend: ✅ done, 🔜 in progress or next, 📋 remaining.
 
@@ -48,13 +48,22 @@ Legend: ✅ done, 🔜 in progress or next, 📋 remaining.
     - `RequestRateLimiter` at the gateway
     - Per-IP, per-route key resolver
     - Filter ordering (limiter before auth-server call)
+11. **Messaging with RabbitMQ (basics)**
+    - Concepts: broker, producer, consumer, exchange, queue, binding, routing key, ack, vhost
+    - Management UI walkthrough
+    - Portable RabbitMQ 4.4.1 + Erlang 28 on Windows (no admin)
+    - `RatingCreatedEvent`: rating-service publishes to `rating.exchange`, hotel-service consumes from `hotel.rating.queue` and updates `averageRating` / `ratingCount`
+    - Tested: happy path, and consumer offline (message waits, delivered on restart)
 
 ---
 
 ## 🔜 In progress / next
 
+- Messaging step 4: exchange types hands-on (direct, fanout, topic), e.g. a second consumer on the same event
+- Messaging step 5: reliability (retries, dead-letter queue, idempotency, publisher confirms, outbox)
+- Then Kafka, and compare with RabbitMQ
 - Test the rate limiter: 429s, `X-RateLimit-*` headers, keys in `redis-cli`
-- Commit `config-repo` and the gateway changes
+- Commit `config-repo`, the gateway changes and the RabbitMQ work
 
 ---
 
@@ -85,9 +94,9 @@ Legend: ✅ done, 🔜 in progress or next, 📋 remaining.
 - Eventual consistency, idempotency
 
 ### Messaging
-- Kafka or RabbitMQ
-- Event-driven architecture (producers, consumers, topics, queues)
-- Dead-letter queues, retries
+- RabbitMQ: exchange types (direct, fanout, topic), dead-letter queues, retries, publisher confirms
+- Event for rating updates (average currently ignores edits)
+- Kafka (topics, partitions, consumer groups) and comparison with RabbitMQ
 
 ### Configuration (finish)
 - Runtime refresh: `/actuator/refresh`, Spring Cloud Bus
